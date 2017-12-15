@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package hello;
+
+service Hello {
+          rpc Sayhello(Input) returns(Output) {}
+          rpc SayHelloAll(Input1) returns(Output) {}
+          rpc StreamAll (Input2) returns(stream Output) {}
+}
+
+message Input {
+string wish =1;
+string name =2;
+}
+message Input1 {
+    int32 num = 1;
+    string alias = 2;
+
+}
+
+message Output {
+string name = 1;
+}
+message Input2 {
+    string allNicknames =1;
+}
+
