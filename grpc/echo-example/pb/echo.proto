@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package echo;
+
+service Echo {
+    rpc EchoEcho(Input) returns(Output) {}
+    rpc EchoEchoOutputStream(Input) returns(stream OutputStream) {}
+    rpc EchoEchoInputStream(stream Input) returns(Output) {}
+    rpc EchoEchoBiStream(stream OutputStream) returns(stream OutputStream) {}
+}
+
+message Input {
+    string text = 1;
+}
+
+message Output {
+    string text = 1;
+}
+message OutputStream {
+    string text = 1;
+}
+
