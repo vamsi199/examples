@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	pb "github.com/vamsi199/examples/grpc/pb"
+	pb "github.com/vamsi199/examples/grpc/Hello/pb"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"log"
@@ -45,14 +45,15 @@ func (content) SayHelloAll(ctx context.Context, i *pb.Input1) (o *pb.Output, err
 }
 
 func (content) StreamAll(i2 *pb.Input2, stream pb.Hello_StreamAllServer) (err error) {
-	s := content{"stream1"}
-	s1 := content{"stream2"}
+	fmt.Println(i2.AllNicknames)
+	//s := i2.AllNicknames
+	o := pb.Output{i2.AllNicknames}
 	for i := 0; i < 2; i++ {
 		if i == 0 {
 
-			err = stream.Send(s)
+			err = stream.Send(&o)
 		}
-		err = stream.Send(s1)
+		//err = stream.Send(s1)
 		return err
 	}
 

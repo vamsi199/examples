@@ -2,17 +2,18 @@ package main
 
 import (
 	"fmt"
-	pb "github.com/vamsi199/examples/grpc/pb"
+	pb "github.com/vamsi199/examples/grpc/Hello/pb"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"io"
 	"log"
+	"strconv"
 )
 
 func main() {
 	//var i pb.Input
 	i := &pb.Input{"hello", "vamsi"}
-	i1 := &pb.Input1{1, "karthik"}
+	i1 := &pb.Input1{1, "karthik"+"added"+strconv.Itoa(1)}
 	i2 := &pb.Input2{"stream"}
 	conn, err := grpc.Dial("localhost:8080", grpc.WithInsecure())
 	if err != nil {
@@ -38,14 +39,14 @@ func main() {
 
 	}
 	for {
-		feature, err := stream.Recv()
+		st, err := stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Fatalf("%v.ListFeatures(_) = _, %v", client, err)
+			log.Fatalf("%v.streams= _, %v", client, err)
 		}
-		log.Println(feature)
+		log.Println(st)
 	}
 
 }
