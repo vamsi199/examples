@@ -1,52 +1,76 @@
 package main
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	pb "github.com/vamsi199/examples/grpc/Hello/pb"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"io"
 	"log"
-	"strconv"
+	"time"
 )
 
+type gobvar struct {
+	Name string
+	Id   int
+	Date time.Time
+}
+
 func main() {
-	//var i pb.Input
-	i := &pb.Input{"hello", "vamsi"}
-	i1 := &pb.Input1{1, "karthik"+"added"+strconv.Itoa(1)}
-	i2 := &pb.Input2{"stream"}
-	conn, err := grpc.Dial("localhost:8080", grpc.WithInsecure())
+	var gvar gobvar
+	b, err := Marshal(&gvar)
+	if err != nil {
+		log.Println("error marshaling", err)
+	}
+	conn, err := grpc.Dial("localhost:8081", grpc.WithInsecure())
 	if err != nil {
 		log.Fatalln("error dailing", err)
 	}
+	defer conn.Close()
 
 	client := pb.NewHelloClient(conn)
-	resp, err := client.Sayhello(context.Background(), i)
+	Bistream, err := client.Duplexstream(context.Background())
 	if err != nil {
-		log.Fatalln("cannot get the response", err)
+		fmt.Println(err)
 	}
-	fmt.Println(resp.Name)
 
-	resp, err = client.SayHelloAll(context.Background(), i1)
-	if err != nil {
-		log.Fatalln("error dailing", err)
-	}
-	fmt.Println(resp)
+	ch := make(chan byte)
 
-	stream, err := client.StreamAll(context.Background(), i2)
-	if err != nil {
-		log.Fatalln("cannot get the response stream", err)
-
-	}
-	for {
-		st, err := stream.Recv()
-		if err == io.EOF {
-			break
+	// receive from server
+	go func() {
+		for {
+			o, err := Bistream.Recv()
+			if err == io.EOF {
+				close(ch)
+				break
+			}
+			fmt.Println("receiving", o.Response)
 		}
-		if err != nil {
-			log.Fatalf("%v.streams= _, %v", client, err)
-		}
-		log.Println(st)
+	}()
+
+	o := &pb.DuplexOut{b}
+	err = Bistream.Send(o)
+	if err != nil {
+		fmt.Println("error in sending", err)
 	}
 
+	err = Bistream.CloseSend()
+	if err != nil {
+		fmt.Println("error in closing", err)
+	}
+	<-ch // or else sleep for some time to give the go routine to complete execution
+
+}
+
+func Marshal(v *gobvar) ([]byte, error) {
+	*v = gobvar{"vamsi", 12, time.Now()}
+	var b bytes.Buffer
+	enc := gob.NewEncoder(&b)
+	err := enc.Encode(v)
+	if err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }
