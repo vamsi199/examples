@@ -6,47 +6,97 @@ import (
 	"github.com/craigivy/dalog"
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
-	"gitlab.com/skyrepublic/sky/pkg/attachment"
 	"io/ioutil"
-
 	"mime/multipart"
 	"net/http"
 	"strings"
-	"github.com/satori/go.uuid"
+	"strconv"
+	"time"
+)
+
+type Attachment struct {
+	ID          string    `db:"id"`
+	Created     time.Time `db:"created"`
+	LastUpdated time.Time `db:"last_updated"`
+	EventID   string `db:"event_id"`
+	EventType string `db:"event_type"`
+	FileType  string `db:"file_type"`
+	Encoding  string `db:"encoding"`
+	Filename  string `db:"filename"`
+	Size      int    `db:"size"`
+	Payload   []byte `db:"payload"`
+}
+
+const (
+	id          = "id"
+	filename    = "filename"
+	fileType    = "file_type"
+	encoding    = "encoding"
+	size        = "size"
+	lastUpdated = "last_updated"
+	created     = "created"
 )
 
 type server struct {
 	Log dalog.Log
 }
+type values struct {
+	boundary    string
+	body        []byte
+	contentType string
+}
 
 var hs = server{dalog.NoContext()}
 
 func main() {
-	fmt.Println("listening on 8084 connect with /upload")
+	fmt.Println("listening on 8086 connect with /upload")
 	router := mux.NewRouter()
 	router.HandleFunc("/upload", handler).Methods("POST")
-	err := http.ListenAndServe(":8084", router)
+	err := http.ListenAndServe(":8086", router)
 	if err != nil {
 		panic(err)
 	}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
+	attachments, err := getMultipartFiles(r)
+	if err != nil {
+		hs.Log.Error(err)
+		return
+	}
 
-	//get the multipart file from request
+	form, err := DocumentMIMESerialize(attachments)
+	if err != nil {
+		hs.Log.Error(err)
+		return
+	}
+
+	attachs, err := DocumentMIMEDeSerialize(form)
+	if err != nil {
+		hs.Log.Error(err)
+		return
+	}
+
+	fmt.Println(attachs)
+
+}
+
+func getMultipartFiles(r *http.Request) (attachments []Attachment, err error) {
+	var attachs = []Attachment{}
 	multiPartReader, err := r.MultipartReader()
 	if err != nil {
 		hs.Log.Error(err)
+		return attachs, err
 	}
 	form, err := multiPartReader.ReadForm(32 << 30)
 	if err != nil {
 		hs.Log.Error(err)
+		return attachs, err
 	}
-	var attachs []attachment.Attachment
 	fileHeaders := form.File
 	for _, val := range fileHeaders {
-		attach := attachment.Attachment{}
-		for i, fileHeader := range val {
+		attach :=Attachment{}
+		for _, fileHeader := range val {
 			file, err := fileHeader.Open()
 			if err != nil {
 				hs.Log.Error(err)
@@ -55,127 +105,111 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				hs.Log.Error(err)
 			}
-			fn := strings.SplitN(fileHeader.Filename, ".", 2)
-			attach.ID = uuid.NewV4().String()
-			attach.FileType = fn[1]
-			attach.Size = fileHeader.Size
+			attach.Created=time.Now()
+			attach.LastUpdated=time.Now()
 			attach.Payload = b
+			fn := strings.SplitN(fileHeader.Filename, ".", 2)
+			attach.FileType = fn[1]
+			attach.Encoding = "" //TODO figure out about the encoding
 			attach.Filename = fileHeader.Filename
-
-			fmt.Println(i,"attachements comming from client:", string(attach.Payload))
-			fmt.Println("attachements comming from client:size", attach.Size)
-			fmt.Println("attachements comming from client:filename", attach.Filename)
-			fmt.Println("attachements comming from client:filetype", attach.FileType)
+			attach.Size = int(fileHeader.Size)
+			attach.Payload = b
 		}
 		attachs = append(attachs, attach)
-
 	}
-
-	fmt.Println("======================================creating a multipart file======================================")
-
-	//==========================================================================
+	return attachs, nil
+}
+func DocumentMIMESerialize(attachs []Attachment) (form *multipart.Form, err error) {
 	//create a multipart file
-	//get the four attachements for the given backend id
-
-	type values struct {
-		boundary string
-		body []byte
-		contentType string
-	}
-
-	mws := []values{}
-	data:=[][]byte{}
-
-	for i, attach := range attachs {
-
-		body := &bytes.Buffer{}
-		mw := multipart.NewWriter(body)
-		//mw.CreatePart()
-		//multipart.FileHeader{}
-        mw.CreateFormField("here--------------")
-
-		mw.WriteField("id", attach.ID)
-		mw.WriteField("id", attach.ID)
-		mw.WriteField("type", attach.FileType)
-		mw.WriteField("last_updated", attach.LastUpdated.Format("Mon, 02 Jan 2006 15:04:05 -0700"))
-		mw.WriteField("created", attach.Created.Format("Mon, 02 Jan 2006 15:04:05 -0700"))
-		mw.WriteField("encoding", attach.Encoding)
-		mw.WriteField("size", string(attach.Size))
-		mw.WriteField("filename", attach.Filename)
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	for _, attach := range attachs {
+		mw.WriteField(id, attach.ID)
+		mw.WriteField(fileType, attach.FileType)
+		mw.WriteField(lastUpdated, attach.LastUpdated.Format("Mon, 02 Jan 2006 15:04:05 -0700")) //TODO confirm the time format
+		mw.WriteField(created, attach.Created.Format("Mon, 02 Jan 2006 15:04:05 -0700"))
+		mw.WriteField(encoding, attach.Encoding)
+		mw.WriteField(size, strconv.Itoa(attach.Size))
+		mw.WriteField(filename, attach.Filename)
 		writer, err := mw.CreateFormFile(attach.Filename, attach.Filename)
 		if err != nil {
-			hs.Log.Error(errors.Wrap(err, "error in CreateFormFile"))
+			return nil, errors.Wrap(err, "error in CreateFormFile")
 		}
-		_, err = writer.Write(attachs[i].Payload)
+		_, err = writer.Write(attach.Payload)
 		if err != nil {
-			hs.Log.Error(errors.Wrap(err, "error in write file"))
+			return nil, errors.Wrap(err, "error in write file")
 		}
-		err = mw.Close()
-		if err != nil {
-			hs.Log.Error(err)
-		}
-		mws=append(mws,values{contentType:mw.FormDataContentType(),boundary:mw.Boundary(),body:body.Bytes()})
-		data=append(data,body.Bytes())
 
 	}
-	fmt.Println("attachements after mutlipart in bytes:%v",data)
-	fmt.Println("======================================getting attachements from a multipart file======================================")
+	boundary:=mw.Boundary()
+	err = mw.Close()
+	if err != nil {
+		return nil, errors.Wrap(err, "error in closing the multipart writer")
+	}
+	reader := multipart.NewReader(bytes.NewReader(body.Bytes()), boundary)
+	form, err = reader.ReadForm(32 << 30)
+	if err != nil {
+		return nil, errors.Wrap(err, "error in ReadForm")
+	}
+	return form, nil
+}
 
-	//==========================================================================
-	//get the attachements from multipart files
+func DocumentMIMEDeSerialize(form *multipart.Form) (attachs []Attachment, err error) {
+	values := form.Value
+	attachs = make([]Attachment, 4) //TODO discuss about length
+	for key, value := range values {
+		for i, val := range value {
+			switch key {
+			case id:
+				attachs[i].ID = val
+			case filename:
+				attachs[i].Filename = val
+			case fileType:
+				attachs[i].FileType = val
 
-	//ç
-	//	reader := multipart.NewReader(bytes.NewReader(mw.body), mw.boundary)
-//
-	//	for {
-	//		p, err := reader.NextPart()
-	//		if err == io.EOF {
-	//			hs.Log.Debug("end of file in nextpart")
-	//			break
-	//		}
-	//		if err != nil {
-	//			fmt.Println(errors.Wrap(err, "error in next part"))
-	//			return
-	//		}
-	//		formName := p.FormName()
-	//		slurp, err := ioutil.ReadAll(p)
-	//		if err != nil {
-	//			fmt.Println(err)
-	//		}
-	//		fmt.Printf("formname:=%s and formdata:=%s \n", formName,string(slurp))
-//
-	//	}
-	//}
+			case encoding:
+				attachs[i].Encoding = val
 
-	reader := multipart.NewReader(bytes.NewReader(mws[0].body), mws[0].boundary)
-		form1, err := reader.ReadForm(32 << 30)
-		if err != nil {
-			hs.Log.Error(errors.Wrap(err, "error in ReadForm"))
-			return
+			case size:
+				attachs[i].Size, err = strconv.Atoi(val)
+				if err != nil {
+					hs.Log.Error(err)
+					return
+				}
+			case lastUpdated:
+				attachs[i].LastUpdated, err = time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", val)
+				if err != nil {
+					hs.Log.Error(err)
+					return
+				}
+			case created:
+				attachs[i].Created, err = time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", val)
+				if err != nil {
+					hs.Log.Error(err)
+					return
+				}
+
+			}
+
 		}
-		fmt.Println("==============================", form1.Value)
-        //values:=form1.Value
-		fileHeaders = form1.File
-		for _, val := range fileHeaders {
-			attach := attachment.Attachment{}
-			fileHeader := val[0]
+
+	}
+	fileHeaders := form.File
+	for _, val := range fileHeaders {
+		for i, fileHeader := range val {
+			attach := Attachment{}
 			file, err := fileHeader.Open()
 			if err != nil {
-				hs.Log.Error(err)
+				return nil, errors.Wrap(err, "error in file header open")
 			}
 			b, err := ioutil.ReadAll(file)
 			if err != nil {
-				hs.Log.Error(err)
+				return nil, errors.Wrap(err, "error in file readall")
 			}
-			//hs.Log.Debug(string(b), "--------------------")
-			attach.Payload = b
+			attachs[i].Payload = b
+			fmt.Println("finally", string(attachs[i].Payload))
 			attachs = append(attachs, attach)
 		}
-		fmt.Println("finally",string(attachs[0].Payload))
-
-		//fmt.Println("finally:====================82983912839812==================", string(attachs[0].Payload))
-
-		//============================================================================
-
 	}
-
+	return attachs, nil
+}
