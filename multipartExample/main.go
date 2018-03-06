@@ -6,78 +6,99 @@ import (
 	"github.com/craigivy/dalog"
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
+	"gitlab.com/skyrepublic/sky/pkg/event"
 	"io/ioutil"
 	"mime/multipart"
 	"net/http"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
+	"github.com/satori/go.uuid"
 )
 
 type Attachment struct {
 	ID          string    `db:"id"`
 	Created     time.Time `db:"created"`
 	LastUpdated time.Time `db:"last_updated"`
-	EventID   string `db:"event_id"`
-	EventType string `db:"event_type"`
-	FileType  string `db:"file_type"`
-	Encoding  string `db:"encoding"`
-	Filename  string `db:"filename"`
-	Size      int    `db:"size"`
-	Payload   []byte `db:"payload"`
+	EventID     string    `db:"event_id"`
+	EventType   string    `db:"event_type"`
+	FileType    string    `db:"file_type"`
+	Encoding    string    `db:"encoding"`
+	Filename    string    `db:"filename"`
+	Size        int       `db:"size"`
+	Payload     []byte    `db:"payload"`
 }
 
 const (
-	id          = "id"
-	filename    = "filename"
-	fileType    = "file_type"
-	encoding    = "encoding"
-	size        = "size"
-	lastUpdated = "last_updated"
-	created     = "created"
+	id                        = "id"
+	filename                  = "filename"
+	fileType                  = "file_type"
+	encoding                  = "encoding"
+	size                      = "size"
+	lastUpdated               = "last_updated"
+	created                   = "created"
+	skyType                   = "sky_type"
+	version                   = "version"
+	documentLevelCMSFieldName = "document_level_cms"
+	documentLevelCMSFileName  = "document_level_cms_file"
 )
 
 type server struct {
 	Log dalog.Log
 }
-type values struct {
-	boundary    string
-	body        []byte
-	contentType string
-}
 
 var hs = server{dalog.NoContext()}
 
 func main() {
-	fmt.Println("listening on 8086 connect with /upload")
+	fmt.Println("listening on 8087 connect with /upload")
 	router := mux.NewRouter()
 	router.HandleFunc("/upload", handler).Methods("POST")
-	err := http.ListenAndServe(":8086", router)
+	err := http.ListenAndServe(":8087", router)
 	if err != nil {
 		panic(err)
 	}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	attachments, err := getMultipartFiles(r)
+	//attachments, err := getMultipartFiles(r)
+	//if err != nil {
+	//	hs.Log.Error(err)
+	//	return
+	//}
+//
+	//data, boundary, err := DocumentMIMESerialize(attachments)
+	//if err != nil {
+	//	hs.Log.Error(err)
+	//	return
+	//}
+//
+	//attachs, err := DocumentMIMEDeSerialize(data, boundary)
+	//if err != nil {
+	//	hs.Log.Error(err)
+	//	return
+	//}
+//
+	//fmt.Println(attachs)
+
+	b,err:=ioutil.ReadAll(r.Body)
 	if err != nil {
-		hs.Log.Error(err)
+		hs.Log.Error(errors.Wrap(err,"error in read all"))
 		return
 	}
-
-	form, err := DocumentMIMESerialize(attachments)
+	ev:=event.Header{ID:uuid.NewV4().String(),SkyType:created,Version:1,Created:time.Now()}
+	hs.Log.Debug("hea:",ev)
+	serviceLevelMIME,boundary,err:=ServiceLevelMIMESerialize(b,ev)
 	if err != nil {
-		hs.Log.Error(err)
+		hs.Log.Error(errors.Wrap(err,"error service serialize"))
 		return
 	}
-
-	attachs, err := DocumentMIMEDeSerialize(form)
+	doc,eve,err:=ServiceLevelMIMEDeSerialize(serviceLevelMIME,boundary)
 	if err != nil {
-		hs.Log.Error(err)
+		hs.Log.Error(errors.Wrap(err,"error service deserialize"))
 		return
 	}
-
-	fmt.Println(attachs)
+	hs.Log.Debug("header:",eve)
+	hs.Log.Debug("doc:",string(doc))
 
 }
 
@@ -95,7 +116,7 @@ func getMultipartFiles(r *http.Request) (attachments []Attachment, err error) {
 	}
 	fileHeaders := form.File
 	for _, val := range fileHeaders {
-		attach :=Attachment{}
+		attach := Attachment{}
 		for _, fileHeader := range val {
 			file, err := fileHeader.Open()
 			if err != nil {
@@ -105,8 +126,8 @@ func getMultipartFiles(r *http.Request) (attachments []Attachment, err error) {
 			if err != nil {
 				hs.Log.Error(err)
 			}
-			attach.Created=time.Now()
-			attach.LastUpdated=time.Now()
+			attach.Created = time.Now()
+			attach.LastUpdated = time.Now()
 			attach.Payload = b
 			fn := strings.SplitN(fileHeader.Filename, ".", 2)
 			attach.FileType = fn[1]
@@ -119,7 +140,7 @@ func getMultipartFiles(r *http.Request) (attachments []Attachment, err error) {
 	}
 	return attachs, nil
 }
-func DocumentMIMESerialize(attachs []Attachment) (form *multipart.Form, err error) {
+func DocumentMIMESerialize(attachs []Attachment) (data []byte, boundary string, err error) {
 	//create a multipart file
 	body := &bytes.Buffer{}
 	mw := multipart.NewWriter(body)
@@ -133,28 +154,28 @@ func DocumentMIMESerialize(attachs []Attachment) (form *multipart.Form, err erro
 		mw.WriteField(filename, attach.Filename)
 		writer, err := mw.CreateFormFile(attach.Filename, attach.Filename)
 		if err != nil {
-			return nil, errors.Wrap(err, "error in CreateFormFile")
+			return nil, "", errors.Wrap(err, "error in CreateFormFile")
 		}
 		_, err = writer.Write(attach.Payload)
 		if err != nil {
-			return nil, errors.Wrap(err, "error in write file")
+			return nil, "", errors.Wrap(err, "error in write file")
 		}
 
 	}
-	boundary:=mw.Boundary()
+	boundary = mw.Boundary()
 	err = mw.Close()
 	if err != nil {
-		return nil, errors.Wrap(err, "error in closing the multipart writer")
+		return nil, "", errors.Wrap(err, "error in closing the multipart writer")
 	}
-	reader := multipart.NewReader(bytes.NewReader(body.Bytes()), boundary)
-	form, err = reader.ReadForm(32 << 30)
+	return body.Bytes(), boundary, nil
+}
+
+func DocumentMIMEDeSerialize(data []byte, boundary string) (attachs []Attachment, err error) {
+	reader := multipart.NewReader(bytes.NewReader(data), boundary)
+	form, err := reader.ReadForm(32 << 30)
 	if err != nil {
 		return nil, errors.Wrap(err, "error in ReadForm")
 	}
-	return form, nil
-}
-
-func DocumentMIMEDeSerialize(form *multipart.Form) (attachs []Attachment, err error) {
 	values := form.Value
 	attachs = make([]Attachment, 4) //TODO discuss about length
 	for key, value := range values {
@@ -213,3 +234,73 @@ func DocumentMIMEDeSerialize(form *multipart.Form) (attachs []Attachment, err er
 	}
 	return attachs, nil
 }
+
+// ServiceLevelMIMESerialize will parse all the attachements and returns multipart form
+func ServiceLevelMIMESerialize(documentLevelCMS []byte, eventHeader event.Header) (serviceLevelMIME []byte, boundary string, err error) {
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	mw.WriteField(id, eventHeader.ID)
+	mw.WriteField(skyType, eventHeader.SkyType)
+	mw.WriteField(version, strconv.Itoa(int(eventHeader.Version))) //TODO
+	mw.WriteField(created, eventHeader.Created.Format("Mon, 02 Jan 2006 15:04:05 -0700"))
+	writer, err := mw.CreateFormFile(documentLevelCMSFieldName, documentLevelCMSFileName)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "error in CreateFormFile")
+	}
+	_, err = writer.Write(documentLevelCMS)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "error in write file")
+	}
+	boundary = mw.Boundary()
+	err = mw.Close()
+	if err != nil {
+		return nil, "", errors.Wrap(err, "error in closing the multipart writer")
+	}
+	return body.Bytes(), boundary, nil
+}
+
+// ServiceLevelMIMEDeSerialize will get the documentlevelCMS out of the serviceLevelMIME
+func ServiceLevelMIMEDeSerialize(serviceLevelMIME []byte, boundary string) (documentLevelCMS []byte, eventHeader event.Header, err error) {
+
+	reader := multipart.NewReader(bytes.NewReader(serviceLevelMIME), boundary)
+	form, err := reader.ReadForm(32 << 30)
+	if err != nil {
+		return nil, event.Header{}, errors.Wrap(err, "error in ReadForm")
+	}
+	values := form.Value
+	for key, value := range values {
+		switch key {
+		case id:
+			eventHeader.ID = value[0]
+		case skyType:
+			eventHeader.SkyType = value[0]
+		case version:
+			num, err := strconv.Atoi(value[0])
+			if err != nil {
+				hs.Log.Error(err)
+			}
+			eventHeader.Version = uint(num)
+		case created:
+			eventHeader.Created, err = time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", value[0])
+			if err != nil {
+				hs.Log.Error(err)
+			}
+
+		}
+	}
+	fileHeaders := form.File
+	for _, fileHeader := range fileHeaders {
+		file, err := fileHeader[0].Open()
+		if err != nil {
+			return nil, event.Header{}, errors.Wrap(err, "error in file header open")
+		}
+		b, err := ioutil.ReadAll(file)
+		if err != nil {
+			return nil, event.Header{}, errors.Wrap(err, "error in file readall")
+		}
+		documentLevelCMS = b
+	}
+
+	return documentLevelCMS, eventHeader, nil
+}
+
