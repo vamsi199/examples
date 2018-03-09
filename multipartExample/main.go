@@ -11,9 +11,36 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
+	"strings"
+	"encoding/json"
+	"gitlab.com/skyrepublic/sky/pkg/backendevent"
 	"github.com/satori/go.uuid"
+)
+
+//Error holds the Message required for json response
+type Error struct {
+	Message string `json:"message"`
+	Code uint `json:"code"`
+}
+
+var (
+
+	// errLimitExeeded will be returened by the getMultipartFiles
+	// when we get the attachements more than the limit
+	errLimitExeeded = errors.New("attachment limit exeeded")
+
+	// errNotExists will be returned by the getMultipartFiles
+	//when we doesn't get the payload
+	errNotExists = errors.New("payload doesn't exists")
+
+	// errDuplication will be returned by the getMultipartFiles
+	//when we get the duplicate files
+	errDuplication = errors.New("file duplication not allowed")
+
+	// errInRead will be returned by the getMultipartFiles
+	//when we get the error while reading the multipart file
+	errInRead = errors.New("error in reading the documents")
 )
 
 type Attachment struct {
@@ -25,7 +52,7 @@ type Attachment struct {
 	FileType    string    `db:"file_type"`
 	Encoding    string    `db:"encoding"`
 	Filename    string    `db:"filename"`
-	Size        int       `db:"size"`
+	Size        int64       `db:"size"`
 	Payload     []byte    `db:"payload"`
 }
 
@@ -52,7 +79,7 @@ var hs = server{dalog.NoContext()}
 func main() {
 	fmt.Println("listening on 8087 connect with /upload")
 	router := mux.NewRouter()
-	router.HandleFunc("/upload", handler).Methods("POST")
+	router.HandleFunc("/app/{app_id}/ref/{user_ref}/events", handler).Methods("POST")
 	err := http.ListenAndServe(":8087", router)
 	if err != nil {
 		panic(err)
@@ -60,25 +87,44 @@ func main() {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	//attachments, err := getMultipartFiles(r)
-	//if err != nil {
-	//	hs.Log.Error(err)
-	//	return
-	//}
-//
-	//data, boundary, err := DocumentMIMESerialize(attachments)
-	//if err != nil {
-	//	hs.Log.Error(err)
-	//	return
-	//}
-//
-	//attachs, err := DocumentMIMEDeSerialize(data, boundary)
-	//if err != nil {
-	//	hs.Log.Error(err)
-	//	return
-	//}
-//
-	//fmt.Println(attachs)
+	var backendevent backendevent.BackendEvent
+	params:=mux.Vars(r)
+	if userRef, exists := params["user_ref"]; exists {
+		backendevent.UserRef = userRef
+		fmt.Println(userRef)
+	}
+	if appID, exists := params["app_id"]; exists { //TODO validate for appid and userref
+		backendevent.AppID = appID
+		fmt.Println(appID)
+	}
+	if backendevent.UserRef == "" || backendevent.AppID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(Error{Message: "userref or app id is missing"})
+		return
+	}
+
+	attachments, err := getMultipartFiles(r,w)
+	if err != nil {
+		//http.Error(w,err.Error(), http.StatusBadRequest)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(Error{Message: err.Error(),Code:http.StatusBadRequest})
+
+		return
+	}
+
+	data, boundary, err := DocumentMIMESerialize(attachments)
+	if err != nil {
+		hs.Log.Error(err)
+		return
+	}
+
+	attachs, err := DocumentMIMEDeSerialize(data, boundary)
+	if err != nil {
+		hs.Log.Error(err)
+		return
+	}
+
+	fmt.Println(attachs)
 
 	b,err:=ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -86,7 +132,6 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev:=event.Header{ID:uuid.NewV4().String(),SkyType:created,Version:1,Created:time.Now()}
-	hs.Log.Debug("hea:",ev)
 	serviceLevelMIME,boundary,err:=ServiceLevelMIMESerialize(b,ev)
 	if err != nil {
 		hs.Log.Error(errors.Wrap(err,"error service serialize"))
@@ -97,49 +142,70 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		hs.Log.Error(errors.Wrap(err,"error service deserialize"))
 		return
 	}
-	hs.Log.Debug("header:",eve)
-	hs.Log.Debug("doc:",string(doc))
+	fmt.Println(doc,eve)
+
 
 }
 
-func getMultipartFiles(r *http.Request) (attachments []Attachment, err error) {
+
+func getMultipartFiles(r *http.Request,w http.ResponseWriter) (attachments []Attachment, err error) {
 	var attachs = []Attachment{}
 	multiPartReader, err := r.MultipartReader()
 	if err != nil {
-		hs.Log.Error(err)
-		return attachs, err
+		hs.Log.Error(errors.Wrap(err,"error in multiapart reader"))
+		return []Attachment{}, errInRead
 	}
-	form, err := multiPartReader.ReadForm(32 << 30)
+	form, err := multiPartReader.ReadForm(32 << 30) //TODO make sure about the max memory
 	if err != nil {
-		hs.Log.Error(err)
-		return attachs, err
+		hs.Log.Error(errors.Wrap(err,"error in read form"))
+		return []Attachment{}, errInRead
 	}
 	fileHeaders := form.File
-	for _, val := range fileHeaders {
+	attachementLimit := 0
+	var keys []string
+	for key, val := range fileHeaders {
+		if attachementLimit > 3 {
+			hs.Log.Error(errors.Wrap(errLimitExeeded,"received more than the attachement limit"))
+			return []Attachment{}, errLimitExeeded
+		}
+		attachementLimit++
+		duplicationCheck := 0
 		attach := Attachment{}
 		for _, fileHeader := range val {
+			if duplicationCheck > 0 {
+				hs.Log.Error(errors.Wrap(errDuplication,"file received multipale times"))
+				return []Attachment{}, errDuplication
+			}
+			duplicationCheck++
 			file, err := fileHeader.Open()
 			if err != nil {
-				hs.Log.Error(err)
+				hs.Log.Error(errors.Wrap(err,"error in open file"))
+				return []Attachment{}, errInRead
 			}
 			b, err := ioutil.ReadAll(file)
 			if err != nil {
-				hs.Log.Error(err)
+				hs.Log.Error(errors.Wrap(err,"error in file readall"))
+				return []Attachment{}, errInRead
 			}
-			attach.Created = time.Now()
-			attach.LastUpdated = time.Now()
 			attach.Payload = b
 			fn := strings.SplitN(fileHeader.Filename, ".", 2)
 			attach.FileType = fn[1]
 			attach.Encoding = "" //TODO figure out about the encoding
 			attach.Filename = fileHeader.Filename
-			attach.Size = int(fileHeader.Size)
+			attach.Size = fileHeader.Size
 			attach.Payload = b
 		}
 		attachs = append(attachs, attach)
+		keys = append(keys, key)
+	}
+	exists := ContainsString(keys, "toto")
+	if !exists {
+		hs.Log.Error(errors.Wrap(errNotExists,"payload not received"))
+		return []Attachment{}, errNotExists
 	}
 	return attachs, nil
 }
+
 func DocumentMIMESerialize(attachs []Attachment) (data []byte, boundary string, err error) {
 	//create a multipart file
 	body := &bytes.Buffer{}
@@ -150,7 +216,7 @@ func DocumentMIMESerialize(attachs []Attachment) (data []byte, boundary string, 
 		mw.WriteField(lastUpdated, attach.LastUpdated.Format("Mon, 02 Jan 2006 15:04:05 -0700")) //TODO confirm the time format
 		mw.WriteField(created, attach.Created.Format("Mon, 02 Jan 2006 15:04:05 -0700"))
 		mw.WriteField(encoding, attach.Encoding)
-		mw.WriteField(size, strconv.Itoa(attach.Size))
+		mw.WriteField(size, strconv.Itoa(int(attach.Size)))
 		mw.WriteField(filename, attach.Filename)
 		writer, err := mw.CreateFormFile(attach.Filename, attach.Filename)
 		if err != nil {
@@ -160,13 +226,13 @@ func DocumentMIMESerialize(attachs []Attachment) (data []byte, boundary string, 
 		if err != nil {
 			return nil, "", errors.Wrap(err, "error in write file")
 		}
-
 	}
 	boundary = mw.Boundary()
 	err = mw.Close()
 	if err != nil {
 		return nil, "", errors.Wrap(err, "error in closing the multipart writer")
 	}
+	fmt.Println(body.String())
 	return body.Bytes(), boundary, nil
 }
 
@@ -192,7 +258,7 @@ func DocumentMIMEDeSerialize(data []byte, boundary string) (attachs []Attachment
 				attachs[i].Encoding = val
 
 			case size:
-				attachs[i].Size, err = strconv.Atoi(val)
+				attachs[i].Size, err = strconv.ParseInt(val, 10, 64)
 				if err != nil {
 					hs.Log.Error(err)
 					return
@@ -302,5 +368,14 @@ func ServiceLevelMIMEDeSerialize(serviceLevelMIME []byte, boundary string) (docu
 	}
 
 	return documentLevelCMS, eventHeader, nil
+}
+
+func ContainsString(slice []string, str string) bool {
+	for _, check := range slice {
+		if check == str {
+			return true
+		}
+	}
+	return false
 }
 
